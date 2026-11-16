@@ -1,0 +1,59 @@
+name: ci
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: test -f .muonfactory/app.yaml
+  test:
+    name: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: base
+          persist-credentials: false
+      - name: Read the test command from main
+        run: |
+          python3 -I - <<'EOF'
+          import json, os, sys
+          import yaml
+          class UniqueLoader(yaml.SafeLoader):
+              def construct_mapping(self, node, deep=False):
+                  if any(k.tag == "tag:yaml.org,2002:merge" for k, _ in node.value):
+                      raise yaml.YAMLError("app.yaml on main uses a merge key")
+                  result = {}
+                  for key_node, value_node in node.value:
+                      key = self.construct_object(key_node, deep=True)
+                      if key in result:
+                          raise yaml.YAMLError("a key appears twice in app.yaml on main")
+                      result[key] = self.construct_object(value_node, deep=deep)
+                  return result
+          try:
+              text = open("base/.muonfactory/app.yaml", encoding="utf-8").read()
+              data = yaml.load(text, Loader=UniqueLoader)
+          except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
+              sys.exit(f"no readable app.yaml on main: {e}")
+          argv = data.get("test") if isinstance(data, dict) else None
+          if not isinstance(argv, list) or not argv or not all(isinstance(a, str) and a for a in argv):
+              sys.exit("app.yaml on main has no test key holding a list of strings")
+          json.dump(argv, open(os.environ["RUNNER_TEMP"] + "/cmd.json", "w"))
+          EOF
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Run it on the candidate
+        run: python3 -I -c 'import json, os, subprocess, sys; sys.exit(subprocess.call(json.load(open(os.environ["RUNNER_TEMP"] + "/cmd.json")), cwd="candidate"))'
